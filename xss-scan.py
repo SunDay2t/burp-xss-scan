@@ -41,7 +41,8 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self._isEnabled = True
         self.whitelist = None
         self.whitelist_pattern = None
-        self.seen = set()
+        self.seen = set()  # 存储已扫描的参数组合哈希
+        self.scan_history = {}  # 存储哈希到原始URL的映射
         self._requestMap = {}
         self._responseMap = {}
         
@@ -284,6 +285,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self.req_area.setText("")
         self.res_area.setText("")
         self.seen.clear()
+        self.scan_history.clear()
         self._requestMap.clear()
         self._responseMap.clear()
 
@@ -394,13 +396,26 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
 
             req = messageInfo.getRequest()
             info = self._helpers.analyzeRequest(svc, req)
+            url = info.getUrl().toString()
+            
+            # 使用改进的哈希生成方法，只考虑路径和参数名
+            url_hash = self._get_url_hash(url)
+            
+            # 检查是否已扫描过相同参数组合
+            if url_hash in self.seen:
+                return  # 已存在记录，直接跳过测试
+                
+            # 记录完整URL，用于UI显示
+            self.scan_history[url_hash] = url
+            self.seen.add(url_hash)  # 标记为已处理
+
             path = info.getUrl().getPath().lower()
             for ext in self.EXCLUDED_EXTENSIONS:
                 if path.endswith(ext):
                     return
 
-            # Submit scan job
-            self.executor.submit(lambda: self._scan(svc, req))
+            # 提交扫描任务
+            self.executor.submit(lambda: self._scan(svc, req, url_hash))
         except Exception as e:
             self.stdout.println("Error processing HTTP message: " + str(e))
 
@@ -416,7 +431,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             return host.endswith(self.whitelist[1:])
         return host == self.whitelist
 
-    def _scan(self, svc, orig_req):
+    def _scan(self, svc, orig_req, url_hash):
         try:
             info = self._helpers.analyzeRequest(svc, orig_req)
             params = info.getParameters()
@@ -439,7 +454,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 # 检查响应中是否存在原始HTML标签
                 if self.PAYLOAD_HTML in body1:
                     SwingUtilities.invokeLater(lambda:
-                        self._add_result(1, base, req1, body1)
+                        self._add_result(1, url_hash, req1, body1)
                     )
                     return
 
@@ -459,23 +474,21 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 
                 if payload2 in body2:
                     SwingUtilities.invokeLater(lambda:
-                        self._add_result(2, base, req2, body2)
+                        self._add_result(2, url_hash, req2, body2)
                     )
                     return
         except Exception as e:
-            self.stdout.println("Error during scan: " + str(e))
+            # 修改此处，使用传统字符串格式化替代f-string
+            self.stdout.println("Scan error for %s: %s" % (url_hash, str(e)))
                 
-    def _add_result(self, list_no, url, req, resp_body):
+    def _add_result(self, list_no, url_hash, req, resp_body):
         try:
-            # 生成URL哈希值用于去重
-            url_hash = self._get_url_hash(url)
-            if url_hash in self.seen:
-                return
-            self.seen.add(url_hash)
+            # 从历史记录中获取原始URL用于显示
+            original_url = self.scan_history.get(url_hash, url_hash)
             
             # 优化URL显示 - 截断长路径
             try:
-                parsed_url = URL(url)
+                parsed_url = URL(original_url)
                 path = parsed_url.getPath()
                 query = parsed_url.getQuery()
                 
@@ -488,7 +501,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                     truncated_url += "?" + query[:40] + ('...' if len(query) > 40 else '')
             except:
                 # 异常处理：直接使用原始URL
-                truncated_url = url[:120] + ('...' if len(url) > 120 else '')
+                truncated_url = original_url[:120] + ('...' if len(original_url) > 120 else '')
             
             # 添加到列表
             model = self.model1 if list_no == 1 else self.model2
@@ -543,14 +556,39 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             self.stdout.println("Error adding result: " + str(e))
             
     def _get_url_hash(self, url):
-        """生成URL的MD5哈希值用于去重"""
+        """生成URL的哈希值，只考虑路径和参数名，忽略参数值"""
         try:
-            md5 = hashlib.md5()
-            md5.update(url.encode('utf-8'))
-            return md5.hexdigest()
-        except:
-            # 异常时返回原始URL（不建议，但作为备选）
-            return url
+            parsed_url = URL(url)
+            path = parsed_url.getPath()
+            query = parsed_url.getQuery()
+            
+            # 处理路径部分
+            path_hash = hashlib.md5(path.encode('utf-8')).hexdigest()
+            
+            # 处理查询参数部分
+            param_hash = ""
+            if query:
+                # 解析查询参数，只保留参数名
+                params = {}
+                for param in query.split('&'):
+                    if '=' in param:
+                        name, value = param.split('=', 1)
+                        params[name] = None  # 忽略值，只保留参数名
+                    else:
+                        params[param] = None  # 处理没有值的参数
+                        
+                # 按参数名排序后生成字符串
+                sorted_params = sorted(params.keys())
+                param_str = '&'.join(sorted_params)
+                param_hash = hashlib.md5(param_str.encode('utf-8')).hexdigest()
+            
+            # 组合路径哈希和参数哈希 - 使用字符串拼接替代f-string
+            combined_hash = path_hash + "_" + param_hash
+            return combined_hash
+        except Exception as e:
+            # 异常时返回原始URL的哈希
+            self.stdout.println("Error generating parameter hash: " + str(e))
+            return hashlib.md5(url.encode('utf-8')).hexdigest()
 
 class SingleSelectMouseListener(MouseAdapter):
     def __init__(self, extender, list_idx):
@@ -595,4 +633,4 @@ class ButtonHoverListener(MouseAdapter):
         self.button.setBackground(self.originalBackground.brighter())
         
     def mouseExited(self, e):
-        self.button.setBackground(self.originalBackground)
+        self.button.setBackground(self.originalBackground)    
