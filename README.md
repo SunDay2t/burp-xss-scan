@@ -27,6 +27,3 @@ burp安装jython
 
 
 ![67277bc6218ae85b4ac2b518d9fef3e](https://github.com/user-attachments/assets/2d6e8996-9b5e-4abd-9cdc-6e5613b425bc)
-
-支持的话可以打赏点小费让哥们买个馒头充饥
-![e22c44d2351b15171480c391a1b732f](https://github.com/user-attachments/assets/224cfda9-8666-489b-9b4b-0209e2166aa6)
